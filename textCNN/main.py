@@ -46,6 +46,8 @@ class GenerateData():
             for line in tqdm(lines, total=len(lines)):
                 user = json.loads(line.strip())
                 tips = [t['text'] for t in user['fsq']['tips']['tips content'][:MAX_SEQLEN]]
+                if len(tips) < 1:
+                    continue
                 self.mask.append([True] * len(tips) + [False] * (MAX_SEQLEN - len(tips)))
                 if len(tips) < MAX_SEQLEN:
                     tips.extend(['' for _ in range(MAX_SEQLEN - len(tips))])
@@ -153,7 +155,7 @@ class TextCNN():
         emb_text = tf.keras.layers.Embedding(
             NUM_WORDS+1, EMBEDDING_SIZE,
             embeddings_initializer=tf.keras.initializers.constant(embeddings_matrix),
-            trainable=False
+            trainable=True
         )(text_seq_reshape)
         # conv layers
         convs = []
@@ -246,6 +248,7 @@ class TextCNN():
                     ", AUC = " + "{:.5f}".format(metrics.roc_auc_score(y_true, y_pred))
                 )
 
+            print(list(y_pred).count(1), list(y_true).count(1))
             predictions.extend(list(y_pred))
             ground_truth.extend(list(y_true))
 
@@ -259,8 +262,8 @@ class TextCNN():
             self.run_one_epoch(sess, 0, dataset, is_training=False)
 
 if __name__ == '__main__':
-    trainset = GenerateData('../../embedding/train_en.json')
-    testset = GenerateData('../../embedding/test_en.json', trainset.tokenizer)
+    trainset = GenerateData('../../embedding/train.json')
+    testset = GenerateData('../../embedding/test.json', trainset.tokenizer)
     embeddings_matrix = get_word2vec_dictionaries(trainset.tokenizer)
     model = TextCNN()
     model.train(trainset, testset)

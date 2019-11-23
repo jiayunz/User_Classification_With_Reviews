@@ -5,30 +5,24 @@ import json
 from sklearn import metrics
 from tqdm import tqdm
 import os
+import re
 from bert_layer import *
 
 CONTINUE_TRAIN = False
-MAX_SEQLEN = 7
-MAX_TEXTLEN = 5
-BATCH_SIZE = 32
-EPOCHS = 20
-LEARNING_RATE = 1e-3
-ATT_SIZE = 64
+MAX_SEQLEN = 16
+MAX_TEXTLEN = 25
+BATCH_SIZE = 512
+EPOCHS = 100
+LEARNING_RATE = 1e-5
+ATT_SIZE = 256
 MODEL_PATH = 'model/'
 DROPOUT_RATE = 0.5
-DISPLAY_ITER = 1
-WORD2VEC_PATH = 'word2vec_model/model'
-BERT_HUB_MODULE_HANDLE = 'https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1'
+DISPLAY_ITER = 10
 BERT_EMBEDDING_SIZE = 768
-N_FINE_TUNE_LAYERS = 3
-TRAINSET_PATH = '../../embedding/train_multilingual.json'
-TESTSET_PATH = '../../embedding/test_multilingual.json'
-
-if "TFHUB_CACHE_DIR" not in os.environ:
-    #os.environ["TFHUB_CACHE_DIR"] = os.path.join("/home/nds/jiayunz/Structure_Hole/embedding/models/", "tfhub")
-    os.environ["TFHUB_CACHE_DIR"] = os.path.join("/Users/jiayunz/Study/Structural_Hole/embedding/", "tfhub")
-
-
+TRAINSET_PATH = '/bdata/jiayunz/Foursquare/100w/train_1_sentence_emb.json'
+TESTSET_PATH = '/bdata/jiayunz/Foursquare/100w/test_1_sentence_emb.json'
+BERT_MODEL_PATH = '../../embedding/models/multi_cased_L-12_H-768_A-12'
+VENUE_EMBEDDING_PATH = 'venue_embedding.json'
 class GenerateData():
     def __init__(self, rpath):
         self.rpath = rpath
@@ -40,46 +34,40 @@ class GenerateData():
         self.batch_id = 0
 
     def read_data(self):
-        self.text_seq = []
+        self.texts = []
+        self.venues = []
         self.labels = []
         self.mask = []
+        with open(VENUE_EMBEDDING_PATH) as rf:
+            venue_embedding = json.load(rf)
+        #bc = BertClient()
         with open(self.rpath, 'r') as rf:
             lines = rf.readlines()
             for line in tqdm(lines, total=len(lines)):
                 user = json.loads(line.strip())
-                tips = [t['text'] for t in user['fsq']['tips']['tips content'][:MAX_SEQLEN]]
-                self.mask.append([True] * len(tips) + [False] * (MAX_SEQLEN - len(tips)))
-                if len(tips) < MAX_SEQLEN:
-                    tips.extend(['None.' for _ in range(MAX_SEQLEN - len(tips))])
-                self.text_seq.append(tips)
+                #tips = [t['text'] for t in user['fsq']['tips']['tips content'][:MAX_SEQLEN]]
+                #emb_tips = bc.encode(tips)
+                emb_tips = user['fsq']['tips']['tips embedding'][:MAX_SEQLEN]
+                emb_venues = [venue_embedding[t['category']] for t in user['fsq']['tips']['tips content'][:MAX_SEQLEN]]
+                self.mask.append([True] * len(emb_tips) + [False] * (MAX_SEQLEN - len(emb_tips)))
+                if len(emb_tips) < MAX_SEQLEN:
+                    emb_tips = np.concatenate((emb_tips, [[0.] * 768 for _ in range(MAX_SEQLEN - len(emb_tips))]))
+                self.texts.append(emb_tips)
+                self.venues.append(emb_venues)
                 self.labels.append(user['label'])
 
         self.labels = np.eye(2)[self.labels]
 
-
-    def create_InputExamples(self, data, labels):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, u_tips) in enumerate(data):
-            for text in u_tips:
-                examples.append(
-                    run_classifier.InputExample(
-                        guid=None,
-                        text_a=text,
-                        text_b=None,
-                        label=np.argmax(labels[i])
-                    )
-            )
-        return examples
-
     def next(self):
-        if BATCH_SIZE <= len(self.text_seq) - self.batch_id:
-            batch_text_seq = self.text_seq[self.batch_id:(self.batch_id + BATCH_SIZE)]
+        if BATCH_SIZE <= len(self.texts) - self.batch_id:
+            batch_texts = self.texts[self.batch_id:(self.batch_id + BATCH_SIZE)]
+            batch_venues = self.venues[self.batch_id:(self.batch_id + BATCH_SIZE)]
             batch_mask = self.mask[self.batch_id:(self.batch_id + BATCH_SIZE)]
             batch_labels = self.labels[self.batch_id:(self.batch_id + BATCH_SIZE)]
             self.batch_id = self.batch_id + BATCH_SIZE
         else:
-            batch_text_seq = self.text_seq[self.batch_id:]
+            batch_texts = self.texts[self.batch_id:]
+            batch_venues = self.venues[self.venues:]
             batch_mask = self.mask[self.batch_id:]
             batch_labels = self.labels[self.batch_id:]
 
@@ -88,13 +76,13 @@ class GenerateData():
             # reset batch id
             self.batch_id = 0
 
-        batch_input_examples = self.create_InputExamples(batch_text_seq, batch_labels)
-
-        return batch_input_examples, batch_mask, batch_labels
+        return batch_texts, batch_venues, batch_mask, batch_labels
 
     def shuffle(self):
         np.random.seed(1117)
-        np.random.shuffle(self.text_seq)
+        np.random.shuffle(self.texts)
+        np.random.seed(1117)
+        np.random.shuffle(self.venues)
         np.random.seed(1117)
         np.random.shuffle(self.mask)
         np.random.seed(1117)
@@ -108,11 +96,8 @@ class Model():
         self.build_optimizer()
 
     def build_inputs(self):
-        self.bert_inputs = dict(
-            input_ids=tf.placeholder(shape=[None, MAX_TEXTLEN], dtype=tf.int32),
-            input_mask=tf.placeholder(shape=[None, MAX_TEXTLEN], dtype=tf.int32),
-            segment_ids=tf.placeholder(shape=[None, MAX_TEXTLEN], dtype=tf.int32)
-        )
+        self.texts = tf.placeholder(shape=[None, MAX_SEQLEN, BERT_EMBEDDING_SIZE], dtype=tf.float32)
+        self.venues = tf.placeholder(shape=[None, MAX_SEQLEN, BERT_EMBEDDING_SIZE], dtype=tf.float32)
         self.mask = tf.placeholder(tf.int32, [None, MAX_SEQLEN])
         self.targets = tf.placeholder(tf.float32, (None, 2))
         self.dropout_rate = tf.placeholder(tf.float32)
@@ -149,13 +134,14 @@ class Model():
             return output, alphas
 
     def build_model(self):
-        bert_inputs = [self.bert_inputs['input_ids'], self.bert_inputs['input_mask'], self.bert_inputs['segment_ids']]
-        self.emb_text = BertLayer(BERT_HUB_MODULE_HANDLE, n_fine_tune_layers=N_FINE_TUNE_LAYERS)(bert_inputs)
-        emb_text = tf.reshape(self.emb_text, (-1, MAX_SEQLEN, BERT_EMBEDDING_SIZE))
         #embedded_venue = self.venue_embedding(tf.reshape(self.inputs['tip_venue'], (-1,)), 11, config['embedding_size']['tip_venue'])
         #embedded_venue = tf.reshape(embedded_venue, (-1, config['max_seqlen'], config['embedding_size']['tip_venue']))
-        hidden, alpha = self.attention(emb_text, self.mask, return_alphas=True)
-
+        hidden_venue, alpha_venue = self.attention(self.venues, self.mask, return_alphas=True)
+        hidden_text, alpha_text = self.attention(self.texts, self.mask, return_alphas=True)
+        hidden = tf.concat([hidden_text, hidden_venue], axis=1)
+        hidden = tf.keras.layers.Dense(units=512, activation='relu')(hidden)
+        hidden = tf.keras.layers.Dense(units=128, activation='relu')(hidden)
+        hidden = tf.keras.layers.Dense(units=32, activation='relu')(hidden)
         # dropout
         drop_outputs = tf.nn.dropout(hidden, rate=self.dropout_rate)
         self.logits = tf.keras.layers.Dense(units=2, activation=None)(drop_outputs)
@@ -203,22 +189,19 @@ class Model():
 
     def train_one_epoch(self, sess, step, dataset):
         iter = 0
-        while iter * BATCH_SIZE < len(dataset.text_seq):
+        while iter * BATCH_SIZE < len(dataset.texts):
             iter += 1
             self.current_epoch = step
-            batch_text_seq, batch_mask, batch_labels = dataset.next()
-            input_ids, input_mask, segment_ids = get_bert_inputs(batch_text_seq, BERT_HUB_MODULE_HANDLE, MAX_TEXTLEN)
+            batch_texts, batch_venues, batch_mask, batch_labels = dataset.next()
             feed = {
-                self.bert_inputs['input_ids']: input_ids,
-                self.bert_inputs['input_mask']: input_mask,
-                self.bert_inputs['segment_ids']: segment_ids,
+                self.texts: batch_texts,
+                self.venues: batch_venues,
                 self.mask: batch_mask,
                 self.targets: batch_labels,
                 self.dropout_rate: DROPOUT_RATE
             }
 
-            _, y_pred, loss, emb_text = sess.run([self.optimizer, self.predictions, self.loss, self.emb_text], feed_dict=feed)
-            print(self.emb_text)
+            _, y_pred, loss = sess.run([self.optimizer, self.predictions, self.loss], feed_dict=feed)
             y_true = np.argmax(batch_labels, 1)
 
             if iter % DISPLAY_ITER == 0:
@@ -229,30 +212,42 @@ class Model():
                       ", AUC = " + "{:.5f}".format(metrics.roc_auc_score(y_true, y_pred))
                       )
 
+
     def test(self, sess, dataset):
-        input_ids, input_mask, segment_ids = get_bert_inputs(dataset.text_seq, BERT_HUB_MODULE_HANDLE, MAX_TEXTLEN)
+        #with tf.Session() as sess:
+        #    saver = tf.train.Saver()
+        #    saver.restore(sess, tf.train.latest_checkpoint(MODEL_PATH))
+
+        predictions = []
+        ground_truth = []
+
         feed = {
-            self.bert_inputs['input_ids']: input_ids,
-            self.bert_inputs['input_mask']: input_mask,
-            self.bert_inputs['segment_ids']: segment_ids,
+            self.texts: dataset.texts,
+            self.venues: dataset.venues,
             self.mask: dataset.mask,
             self.targets: dataset.labels,
             self.dropout_rate: 0.
         }
 
-        y_pred, loss, emb_text = sess.run([self.predictions, self.loss, self.emb_text], feed_dict=feed)
+        y_pred, loss = sess.run([self.predictions, self.loss], feed_dict=feed)
         y_true = np.argmax(dataset.labels, 1)
-        pred = np.argmax(y_pred, 1)
 
-        print("AUC:", metrics.roc_auc_score(y_true, pred))
-        print(metrics.classification_report(y_true, pred, digits=4))
+
+        predictions.extend(list(y_pred))
+        ground_truth.extend(list(y_true))
+
+        print("AUC:", metrics.roc_auc_score(ground_truth, predictions))
+        print(metrics.classification_report(ground_truth, predictions, digits=4))
 
 
 def main(_):
+    #start_bert_server()
     trainset = GenerateData(TRAINSET_PATH)
     testset = GenerateData(TESTSET_PATH)
     model = Model()
+    #BertServer.shutdown(port=5555)
     model.train(trainset, testset)
+
 
 if __name__ == '__main__':
     tf.app.run()

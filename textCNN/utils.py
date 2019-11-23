@@ -2,7 +2,7 @@ import gensim
 from tqdm import tqdm
 import json
 import numpy as np
-from keras.preprocessing.text import Tokenizer, text_to_word_sequence
+from keras.preprocessing.text import text_to_word_sequence
 
 ## 训练自己的词向量，并保存。
 def train_word2vec(sentences, size, model_path):
@@ -47,7 +47,7 @@ def test_word2vec():
 
 
 if __name__ == '__main__':
-    train_tips = load_tip_text('../embedding/train_en.json')
+    train_tips = load_tip_text('../../embedding/train.json')
     X_train = read_docs(train_tips)
     del train_tips
     train_word2vec(X_train, size=200, model_path='word2vec_model/model')
